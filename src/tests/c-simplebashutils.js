@@ -158,7 +158,6 @@ export default {
         {
           name: 'cat: -v flag (show non-printing)',
           async run(ctx) {
-            // File with control char (0x01) and DEL (0x7F)
             await ctx.writeTempFile('test_v.txt', 'a\x01b\x7Fc\n');
             const catPath = await findBinary(ctx, 's21_cat');
             const s21 = await ctx.exec(`${catPath} -v .verter-tmp/test_v.txt`);
@@ -406,6 +405,58 @@ export default {
         },
       ],
     },
+
+    // ═══════════════════ CODE STYLE CHECKS ═══════════════════
+    {
+      name: 'Code Style Checks',
+      tests: [
+        {
+          name: 'No goto statements',
+          async run(ctx) {
+            const srcDir = 'src';
+            const files = await ctx.listFiles(srcDir, '.c');
+            for (const file of files) {
+              const content = await ctx.readFile(file);
+              ctx.assert(!/\bgoto\b/.test(content), `Found 'goto' in ${file}`);
+            }
+          },
+        },
+        {
+          name: 'No continue statements',
+          async run(ctx) {
+            const srcDir = 'src';
+            const files = await ctx.listFiles(srcDir, '.c');
+            for (const file of files) {
+              const content = await ctx.readFile(file);
+              ctx.assert(!/\bcontinue\b/.test(content), `Found 'continue' in ${file}`);
+            }
+          },
+        },
+        {
+          name: 'At most one return per function',
+          async run(ctx) {
+            const srcDir = 'src';
+            const files = await ctx.listFiles(srcDir, '.c');
+            for (const file of files) {
+              const content = await ctx.readFile(file);
+              const functionsWithMultipleReturns = analyzeReturns(content);
+              ctx.assert(
+                functionsWithMultipleReturns.length === 0,
+                `Multiple returns found in ${file}: ${functionsWithMultipleReturns.map(f => f.name).join(', ')}`
+              );
+            }
+          },
+        },
+        {
+          name: 'Common module exists',
+          async run(ctx) {
+            const hasCommonC = await ctx.fileExists('src/common.c');
+            const hasCommonH = await ctx.fileExists('src/common.h');
+            ctx.assert(hasCommonC && hasCommonH, 'Missing common module (src/common.c and src/common.h)');
+          },
+        },
+      ],
+    },
   ],
 
   styleChecks: [
@@ -439,4 +490,54 @@ async function findBinary(ctx, name) {
   }
 
   return `./${name}`;
+}
+
+/**
+ * Helper: analyze C source for functions with multiple return statements.
+ * Returns array of objects { name, returnCount }.
+ * Simplistic but catches obvious violations.
+ */
+function analyzeReturns(code) {
+  // Remove comments
+  code = code.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+
+  const results = [];
+  const pattern = /\)\s*\{/g;
+  let match;
+
+  while ((match = pattern.exec(code)) !== null) {
+    const openBrace = match.index + match[0].length - 1;
+    const openParen = code.lastIndexOf('(', openBrace);
+    if (openParen === -1) continue;
+
+    const beforeParen = code.slice(0, openParen).trim();
+    const lastWord = beforeParen.split(/\s+/).pop();
+    if (['if', 'for', 'while', 'switch'].includes(lastWord)) continue;
+
+    // Find matching closing brace
+    let depth = 0;
+    let closeBrace = -1;
+    for (let i = openBrace; i < code.length; i++) {
+      if (code[i] === '{') depth++;
+      else if (code[i] === '}') {
+        depth--;
+        if (depth === 0) {
+          closeBrace = i;
+          break;
+        }
+      }
+    }
+
+    if (closeBrace !== -1) {
+      const body = code.slice(openBrace + 1, closeBrace);
+      const returnCount = (body.match(/\breturn\b/g) || []).length;
+      if (returnCount > 1) {
+        const nameMatch = beforeParen.match(/(\w+)\s*$/);
+        const funcName = nameMatch ? nameMatch[1] : 'unknown';
+        results.push({ name: funcName, returnCount });
+      }
+    }
+  }
+
+  return results;
 }
